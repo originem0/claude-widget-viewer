@@ -1,8 +1,7 @@
 #!/bin/bash
 # widget-daemon-start.sh
-# Claude Code SessionStart hook: starts the widget viewer daemon in background.
-# The daemon preheats WebView2 and listens for widget commands via Named Pipe.
+# Optional: manually start the daemon to prewarm WebView2.
+# NOT required — the PostToolUse hook auto-launches on first widget write.
 
-claude-widget-viewer listen &
-disown
+cmd.exe /c "start /b claude-widget-viewer.exe listen" </dev/null >/dev/null 2>&1
 exit 0

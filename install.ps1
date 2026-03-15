@@ -131,27 +131,19 @@ try {
 Write-Host "[3/5] Deploying hook scripts..." -ForegroundColor White
 if (-not (Test-Path $hooksDir)) { New-Item -ItemType Directory -Path $hooksDir -Force | Out-Null }
 
-$daemonHook = @'
-#!/bin/bash
-claude-widget-viewer listen &
-disown
-exit 0
-'@
-
 $writeHook = @'
 #!/bin/bash
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 if [[ "$FILE_PATH" == *".claude/widgets/"*".html" ]]; then
-  claude-widget-viewer send "$FILE_PATH" &
-  disown
+  WIN_PATH=$(cygpath -w "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
+  cmd.exe /c "start /b claude-widget-viewer.exe send \"$WIN_PATH\"" </dev/null >/dev/null 2>&1
 fi
 exit 0
 '@
 
-Set-Content -Path (Join-Path $hooksDir "widget-daemon-start.sh") -Value $daemonHook -NoNewline
 Set-Content -Path (Join-Path $hooksDir "post-write-widget.sh") -Value $writeHook -NoNewline
-Write-Host "  Hooks deployed to $hooksDir" -ForegroundColor Green
+Write-Host "  Hook deployed to $hooksDir" -ForegroundColor Green
 
 # Check jq
 if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
@@ -163,7 +155,6 @@ if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
 Write-Host "[4/5] Configuring Claude Code settings..." -ForegroundColor White
 if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null }
 
-$sessionStartHook = @{ hooks = @(@{ type = "command"; command = "bash ~/.claude/hooks/widget-daemon-start.sh" }) }
 $postToolUseHook = @{ matcher = "Write"; hooks = @(@{ type = "command"; command = "bash ~/.claude/hooks/post-write-widget.sh" }) }
 
 if (Test-Path $settingsFile) {
@@ -173,15 +164,6 @@ if (Test-Path $settingsFile) {
     if (-not $settings.hooks) {
         $settings | Add-Member -NotePropertyName "hooks" -NotePropertyValue ([PSCustomObject]@{})
     }
-
-    # Add SessionStart hook (avoid duplicates)
-    $existingSession = @()
-    if ($settings.hooks.PSObject.Properties["SessionStart"]) {
-        $existingSession = @($settings.hooks.SessionStart | Where-Object {
-            -not ($_.hooks | Where-Object { $_.command -like "*widget-daemon*" })
-        })
-    }
-    $settings.hooks | Add-Member -NotePropertyName "SessionStart" -NotePropertyValue ($existingSession + $sessionStartHook) -Force
 
     # Add PostToolUse hook (avoid duplicates)
     $existingPost = @()
@@ -194,7 +176,7 @@ if (Test-Path $settingsFile) {
 
     $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
 } else {
-    @{ hooks = @{ SessionStart = @($sessionStartHook); PostToolUse = @($postToolUseHook) } } |
+    @{ hooks = @{ PostToolUse = @($postToolUseHook) } } |
         ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
 }
 Write-Host "  settings.json updated." -ForegroundColor Green
