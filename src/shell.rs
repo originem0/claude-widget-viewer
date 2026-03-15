@@ -91,7 +91,11 @@ body {{
     var isFirstLoad = true;
 
     window.injectWidget = function(b64) {{
-        var html = atob(b64);
+        // Decode base64 → binary → UTF-8 (atob alone mangles multibyte chars)
+        var bin = atob(b64);
+        var bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        var html = new TextDecoder('utf-8').decode(bytes);
         if (!html) return;
 
         var root = document.getElementById('widget-root');
