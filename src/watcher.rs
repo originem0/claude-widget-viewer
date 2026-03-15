@@ -1,5 +1,5 @@
 /// File system watcher with debounce.
-/// Uses the `notify` crate to watch for changes and trigger widget reload.
+/// Fix #7: filters events to only the target file, ignores siblings.
 
 use notify::{Watcher, RecursiveMode, Event, EventKind};
 use std::path::Path;
@@ -16,46 +16,63 @@ where
 {
     let (tx, rx) = mpsc::channel();
 
+    // Fix #7: capture the canonical target path to compare against event paths
+    let target_path = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => path.to_path_buf(),
+    };
+    let target_for_filter = target_path.clone();
+
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
         if let Ok(event) = res {
             match event.kind {
                 EventKind::Modify(_) | EventKind::Create(_) => {
-                    let _ = tx.send(());
+                    // Fix #7: only trigger for the specific file we're watching
+                    let is_target = event.paths.iter().any(|p| {
+                        match std::fs::canonicalize(p) {
+                            Ok(canon) => canon == target_for_filter,
+                            Err(_) => p.ends_with(target_for_filter.file_name().unwrap_or_default()),
+                        }
+                    });
+                    if is_target {
+                        let _ = tx.send(());
+                    }
                 }
                 _ => {}
             }
         }
     })
-    .expect("Failed to create file watcher");
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to create file watcher: {}", e);
+        std::process::exit(1);
+    });
 
-    // Watch the parent directory (more reliable on Windows for atomic writes)
+    // Watch parent directory (more reliable on Windows for atomic writes)
     let watch_dir = path.parent().unwrap_or(path);
-    watcher
-        .watch(watch_dir, RecursiveMode::NonRecursive)
-        .expect("Failed to watch directory");
+    if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
+        eprintln!("Failed to watch {}: {}", watch_dir.display(), e);
+        return;
+    }
 
-    let target_path = path.to_path_buf();
     let mut last_fire = Instant::now() - Duration::from_secs(10);
 
     loop {
-        // Block until we get a change notification
         if rx.recv().is_err() {
             break;
         }
 
-        // Drain any queued events (Windows fires multiples for one write)
+        // Drain queued events
         while rx.try_recv().is_ok() {}
 
-        // Debounce: skip if we fired too recently
+        // Debounce
         let now = Instant::now();
         if now.duration_since(last_fire) < Duration::from_millis(DEBOUNCE_MS) {
             continue;
         }
 
-        // Small delay to let the write finish
+        // Small delay for write completion
         std::thread::sleep(Duration::from_millis(50));
 
-        // Read the updated file
         match std::fs::read_to_string(&target_path) {
             Ok(content) if !content.is_empty() => {
                 last_fire = Instant::now();

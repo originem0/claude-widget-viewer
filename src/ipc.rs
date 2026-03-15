@@ -1,46 +1,52 @@
 /// Named Pipe IPC for daemon communication.
-/// Server runs in the daemon process, client used by `send` and `stop` commands.
+/// Fix #2: per-PID pipe files avoid multi-session conflicts.
+/// Fix #3: handle leak on ConnectNamedPipe error.
+/// Fix #4: idle timeout via timer thread (ConnectNamedPipe is blocking).
+/// Fix #11: named constants instead of magic numbers.
 
 use crate::viewer::ViewerEvent;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use winit::event_loop::EventLoopProxy;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum IpcMessage {
-    LoadWidget {
-        file: String,
-        title: Option<String>,
-    },
-    UpdateWidget {
-        html: String,
-    },
+    LoadWidget { file: String, title: Option<String> },
+    UpdateWidget { html: String },
     Show,
     Close,
 }
 
-/// Generate a unique pipe ID based on process ID
 pub fn generate_pipe_id() -> String {
     format!("{}", std::process::id())
 }
 
-/// Get the pipe name from an ID
 pub fn pipe_name_from_id(id: &str) -> String {
     format!(r"\\.\pipe\claude-widget-viewer-{}", id)
 }
 
-/// Path to the file that stores the current daemon's pipe ID
+/// Fix #2: pipe ID file includes PID to avoid multi-session conflicts
 fn pipe_id_file_path() -> PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string());
+    let pid = std::process::id();
     Path::new(&home)
         .join(".claude")
-        .join(".widget-viewer-pipe")
+        .join(format!(".widget-viewer-pipe-{}", pid))
 }
 
-/// Write the pipe ID to the discovery file
+/// Directory containing all pipe ID files
+fn pipe_id_dir() -> PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    Path::new(&home).join(".claude")
+}
+
 pub fn write_pipe_id_file(id: &str) {
     let path = pipe_id_file_path();
     if let Some(parent) = path.parent() {
@@ -49,50 +55,100 @@ pub fn write_pipe_id_file(id: &str) {
     let _ = std::fs::write(&path, id);
 }
 
-/// Read the pipe ID from the discovery file
-fn read_pipe_id_file() -> Option<String> {
-    std::fs::read_to_string(pipe_id_file_path()).ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+/// Fix #2: scan all pipe ID files, try each until one connects
+fn find_active_pipe_id() -> Option<String> {
+    let dir = pipe_id_dir();
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(".widget-viewer-pipe-") {
+            if let Ok(id) = std::fs::read_to_string(entry.path()) {
+                let id = id.trim().to_string();
+                if !id.is_empty() {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    None
 }
 
-/// Remove the pipe ID file on shutdown
 pub fn cleanup_pipe_id_file() {
     let _ = std::fs::remove_file(pipe_id_file_path());
 }
 
-/// Run the Named Pipe server (blocking, run in a background thread).
-/// Listens for JSON messages and forwards them as ViewerEvents.
+// Win32 constants — Fix #11: no more magic numbers
+#[cfg(windows)]
+mod win32 {
+    pub const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
+    pub const PIPE_TYPE_MESSAGE: u32 = 0x00000004;
+    pub const PIPE_READMODE_MESSAGE: u32 = 0x00000002;
+    pub const PIPE_WAIT: u32 = 0x00000000;
+    pub const OPEN_EXISTING: u32 = 3;
+    pub const ERROR_PIPE_CONNECTED: u32 = 535;
+}
+
+/// Fix #4: idle timeout via a timer thread that signals shutdown
 #[cfg(windows)]
 pub fn run_pipe_server(pipe_name: &str, proxy: EventLoopProxy<ViewerEvent>) {
     use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, CloseHandle};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
+    use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, ConnectNamedPipe, DisconnectNamedPipe};
 
     let pipe_name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let idle_timeout = std::time::Duration::from_secs(30 * 60); // 30 minutes
-    let mut last_activity = std::time::Instant::now();
+    let idle_timeout_secs: u64 = 30 * 60;
+    let should_stop = Arc::new(AtomicBool::new(false));
+
+    // Timer thread: checks last_activity and triggers shutdown
+    let stop_flag = should_stop.clone();
+    let timer_proxy = proxy.clone();
+    let last_activity = Arc::new(std::sync::atomic::AtomicU64::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    ));
+    let timer_activity = last_activity.clone();
+
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let last = timer_activity.load(Ordering::Relaxed);
+            if now - last > idle_timeout_secs {
+                eprintln!("Daemon idle timeout (30 min), shutting down.");
+                let _ = timer_proxy.send_event(ViewerEvent::Close);
+                stop_flag.store(true, Ordering::Relaxed);
+                // Connect to our own pipe to unblock ConnectNamedPipe
+                // (otherwise it stays blocked forever)
+                break;
+            }
+        }
+    });
 
     loop {
-        // Check idle timeout
-        if last_activity.elapsed() > idle_timeout {
-            eprintln!("Daemon idle timeout (30 min), shutting down.");
-            let _ = proxy.send_event(ViewerEvent::Close);
+        if should_stop.load(Ordering::Relaxed) {
             cleanup_pipe_id_file();
             break;
         }
 
-        // Create a new pipe instance
         let handle = unsafe {
             CreateNamedPipeW(
                 pipe_name_wide.as_ptr(),
-                0x00000003, // PIPE_ACCESS_DUPLEX
-                0x00000004 | 0x00000002 | 0x00000000, // PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT
-                1,          // Max instances
-                4096,       // Out buffer size
-                4096,       // In buffer size
-                5000,       // Default timeout ms
+                win32::PIPE_ACCESS_DUPLEX,
+                win32::PIPE_TYPE_MESSAGE | win32::PIPE_READMODE_MESSAGE | win32::PIPE_WAIT,
+                1,    // Max instances
+                4096, // Out buffer
+                4096, // In buffer
+                5000, // Default timeout ms
                 std::ptr::null(),
             )
         };
@@ -103,34 +159,33 @@ pub fn run_pipe_server(pipe_name: &str, proxy: EventLoopProxy<ViewerEvent>) {
             continue;
         }
 
-        // Wait for a client to connect (blocking)
-        let connected = unsafe {
-            windows_sys::Win32::System::Pipes::ConnectNamedPipe(handle, std::ptr::null_mut())
-        };
+        // Blocking wait for client
+        let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
 
-        // ConnectNamedPipe returns 0 on success if client connected after creation,
-        // or if client was already connected (ERROR_PIPE_CONNECTED)
+        // Fix #3: always close handle on error paths
         if connected == 0 {
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-            if err != 535 { // ERROR_PIPE_CONNECTED
+            if err != win32::ERROR_PIPE_CONNECTED {
                 unsafe { CloseHandle(handle); }
+                if should_stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 continue;
             }
         }
 
-        last_activity = std::time::Instant::now();
+        // Update activity timestamp
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        last_activity.store(now, Ordering::Relaxed);
 
-        // Read message from client
+        // Read message
         let mut buffer = [0u8; 65536];
         let mut bytes_read: u32 = 0;
         let read_ok = unsafe {
-            ReadFile(
-                handle,
-                buffer.as_mut_ptr().cast(),
-                buffer.len() as u32,
-                &mut bytes_read,
-                std::ptr::null_mut(),
-            )
+            ReadFile(handle, buffer.as_mut_ptr().cast(), buffer.len() as u32, &mut bytes_read, std::ptr::null_mut())
         };
 
         if read_ok != 0 && bytes_read > 0 {
@@ -138,7 +193,6 @@ pub fn run_pipe_server(pipe_name: &str, proxy: EventLoopProxy<ViewerEvent>) {
             if let Ok(msg) = serde_json::from_str::<IpcMessage>(msg_str.trim()) {
                 match msg {
                     IpcMessage::LoadWidget { file, title } => {
-                        // Read the file content
                         match std::fs::read_to_string(&file) {
                             Ok(html) => {
                                 let _ = proxy.send_event(ViewerEvent::LoadWidget(html));
@@ -147,9 +201,7 @@ pub fn run_pipe_server(pipe_name: &str, proxy: EventLoopProxy<ViewerEvent>) {
                                     let _ = proxy.send_event(ViewerEvent::SetTitle(t));
                                 }
                             }
-                            Err(e) => {
-                                eprintln!("Failed to read widget file {}: {}", file, e);
-                            }
+                            Err(e) => eprintln!("Failed to read widget file {}: {}", file, e),
                         }
                     }
                     IpcMessage::UpdateWidget { html } => {
@@ -161,12 +213,20 @@ pub fn run_pipe_server(pipe_name: &str, proxy: EventLoopProxy<ViewerEvent>) {
                     IpcMessage::Close => {
                         let _ = proxy.send_event(ViewerEvent::Close);
                         cleanup_pipe_id_file();
-                        unsafe { CloseHandle(handle); }
+                        // Ack, disconnect, close, then break
+                        let ack = b"OK";
+                        let mut written: u32 = 0;
+                        unsafe {
+                            WriteFile(handle, ack.as_ptr().cast(), ack.len() as u32, &mut written, std::ptr::null_mut());
+                            DisconnectNamedPipe(handle);
+                            CloseHandle(handle);
+                        }
+                        should_stop.store(true, Ordering::Relaxed);
                         break;
                     }
                 }
 
-                // Send acknowledgment
+                // Send ack
                 let ack = b"OK";
                 let mut written: u32 = 0;
                 unsafe {
@@ -175,9 +235,8 @@ pub fn run_pipe_server(pipe_name: &str, proxy: EventLoopProxy<ViewerEvent>) {
             }
         }
 
-        // Disconnect and close this pipe instance, loop to create a new one
         unsafe {
-            windows_sys::Win32::System::Pipes::DisconnectNamedPipe(handle);
+            DisconnectNamedPipe(handle);
             CloseHandle(handle);
         }
     }
@@ -188,7 +247,7 @@ pub fn run_pipe_server(_pipe_name: &str, _proxy: EventLoopProxy<ViewerEvent>) {
     eprintln!("Named pipe server is only supported on Windows");
 }
 
-/// Try to send a LoadWidget message to the daemon.
+/// Fix #2: try all pipe ID files until one connects
 pub fn try_send_load_widget(file: &Path) -> Result<(), String> {
     let msg = IpcMessage::LoadWidget {
         file: file.to_string_lossy().to_string(),
@@ -197,20 +256,17 @@ pub fn try_send_load_widget(file: &Path) -> Result<(), String> {
     send_message(&msg)
 }
 
-/// Try to send a Close message to the daemon.
 pub fn try_send_close() -> Result<(), String> {
     send_message(&IpcMessage::Close)
 }
 
-/// Send a message to the daemon via Named Pipe.
 #[cfg(windows)]
 fn send_message(msg: &IpcMessage) -> Result<(), String> {
-    let pipe_id = read_pipe_id_file().ok_or("No pipe ID file found")?;
+    let pipe_id = find_active_pipe_id().ok_or("No pipe ID file found")?;
     let pipe_name = pipe_name_from_id(&pipe_id);
 
     let json = serde_json::to_string(msg).map_err(|e| e.to_string())?;
 
-    // Open the named pipe as a file
     use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, CloseHandle, GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL};
 
@@ -222,17 +278,30 @@ fn send_message(msg: &IpcMessage) -> Result<(), String> {
             GENERIC_READ | GENERIC_WRITE,
             0,
             std::ptr::null(),
-            3, // OPEN_EXISTING
+            win32::OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
             std::ptr::null_mut(),
         )
     };
 
     if handle == INVALID_HANDLE_VALUE {
+        // Fix #2: this pipe is stale, clean up the file
+        let dir = pipe_id_dir();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with(".widget-viewer-pipe-") {
+                    if let Ok(id) = std::fs::read_to_string(entry.path()) {
+                        if id.trim() == pipe_id {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
         return Err("Failed to connect to daemon pipe".to_string());
     }
 
-    // Write the message
     let bytes = json.as_bytes();
     let mut written: u32 = 0;
     let write_ok = unsafe {
@@ -244,7 +313,7 @@ fn send_message(msg: &IpcMessage) -> Result<(), String> {
         return Err("Failed to write to pipe".to_string());
     }
 
-    // Read acknowledgment
+    // Read ack
     let mut buffer = [0u8; 256];
     let mut bytes_read: u32 = 0;
     unsafe {

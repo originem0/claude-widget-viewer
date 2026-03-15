@@ -1,5 +1,4 @@
 mod viewer;
-mod protocol;
 mod shell;
 mod watcher;
 mod ipc;
@@ -37,33 +36,48 @@ fn main() {
 
     match cli.command {
         Commands::Show { file } => {
-            let html = std::fs::read_to_string(&file).unwrap_or_else(|e| {
-                eprintln!("Failed to read {}: {}", file.display(), e);
-                std::process::exit(1);
+            let html = match std::fs::read_to_string(&file) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {}", file.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            viewer::run(viewer::Mode::Show {
+                html,
+                watch_file: file,
             });
-            viewer::run_viewer(Some(html), Some(file), true);
         }
         Commands::Listen => {
             let pipe_id = ipc::generate_pipe_id();
             ipc::write_pipe_id_file(&pipe_id);
-
-            viewer::run_viewer_daemon(&pipe_id);
+            viewer::run(viewer::Mode::Daemon { pipe_id });
         }
         Commands::Send { file } => {
-            let file = std::fs::canonicalize(&file).unwrap_or_else(|e| {
-                eprintln!("Failed to resolve {}: {}", file.display(), e);
-                std::process::exit(1);
-            });
+            let file = match std::fs::canonicalize(&file) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to resolve {}: {}", file.display(), e);
+                    std::process::exit(1);
+                }
+            };
 
             match ipc::try_send_load_widget(&file) {
                 Ok(()) => {}
                 Err(_) => {
+                    // Fix #1: send fallback must be visible
                     eprintln!("No daemon found, starting viewer directly...");
-                    let html = std::fs::read_to_string(&file).unwrap_or_else(|e| {
-                        eprintln!("Failed to read {}: {}", file.display(), e);
-                        std::process::exit(1);
+                    let html = match std::fs::read_to_string(&file) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            eprintln!("Failed to read {}: {}", file.display(), e);
+                            std::process::exit(1);
+                        }
+                    };
+                    viewer::run(viewer::Mode::Show {
+                        html,
+                        watch_file: file,
                     });
-                    viewer::run_viewer(Some(html), Some(file), false);
                 }
             }
         }

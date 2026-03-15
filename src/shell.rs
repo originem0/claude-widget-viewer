@@ -1,78 +1,47 @@
 /// HTML shell generation.
-/// Produces the base HTML document with CSS variables, morphdom, and widget container.
-/// Widget HTML is injected via evaluate_script("injectWidget(base64)") from Rust.
+/// Fix #6: base64 stored in variable, not duplicated in format string.
+/// Fix #8: no fetch/protocol needed — widget injected via evaluate_script.
 
 const DESIGN_SYSTEM_CSS: &str = include_str!("../assets/design-system.css");
 const MORPHDOM_JS: &str = include_str!("../assets/morphdom.min.js");
 
-/// Generate the JS call to inject widget HTML via base64 encoding.
-/// This avoids string escaping issues with evaluate_script.
+/// Generate JS to inject widget HTML via base64 encoding.
+/// Fix #6: uses a JS variable so base64 payload appears only once.
 pub fn make_inject_js(html: &str) -> String {
-    use std::io::Write;
-    let mut buf = Vec::new();
-    {
-        let mut encoder = Base64Writer::new(&mut buf);
-        encoder.write_all(html.as_bytes()).unwrap();
-        encoder.finish().unwrap();
-    }
-    let b64 = String::from_utf8(buf).unwrap();
-    // Wrap in a ready-check: initialization scripts run before page scripts,
-    // so injectWidget may not exist yet. Wait for DOMContentLoaded.
+    let b64 = base64_encode(html.as_bytes());
     format!(
-        "if(typeof injectWidget==='function'){{injectWidget('{}')}}else{{document.addEventListener('DOMContentLoaded',function(){{injectWidget('{}')}})}}",
-        b64, b64
+        "{{var _b='{}';if(typeof injectWidget==='function'){{injectWidget(_b)}}else{{document.addEventListener('DOMContentLoaded',function(){{injectWidget(_b)}})}}}}",
+        b64
     )
 }
 
-/// Minimal base64 encoder (no external dependency)
-struct Base64Writer<'a> {
-    out: &'a mut Vec<u8>,
-    buf: [u8; 3],
-    len: usize,
-}
+/// Base64 encoder — small, no dependencies, correctness verified by test.
+fn base64_encode(input: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity((input.len() + 2) / 3 * 4);
 
-const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
 
-impl<'a> Base64Writer<'a> {
-    fn new(out: &'a mut Vec<u8>) -> Self {
-        Self { out, buf: [0; 3], len: 0 }
-    }
-    fn flush_buf(&mut self) {
-        if self.len == 0 { return; }
-        let b = &self.buf;
-        self.out.push(B64_CHARS[(b[0] >> 2) as usize]);
-        self.out.push(B64_CHARS[((b[0] & 0x03) << 4 | b[1] >> 4) as usize]);
-        if self.len > 1 {
-            self.out.push(B64_CHARS[((b[1] & 0x0f) << 2 | b[2] >> 6) as usize]);
+        out.push(CHARS[((triple >> 18) & 0x3F) as usize]);
+        out.push(CHARS[((triple >> 12) & 0x3F) as usize]);
+        if chunk.len() > 1 {
+            out.push(CHARS[((triple >> 6) & 0x3F) as usize]);
         } else {
-            self.out.push(b'=');
+            out.push(b'=');
         }
-        if self.len > 2 {
-            self.out.push(B64_CHARS[(b[2] & 0x3f) as usize]);
+        if chunk.len() > 2 {
+            out.push(CHARS[(triple & 0x3F) as usize]);
         } else {
-            self.out.push(b'=');
+            out.push(b'=');
         }
-        self.buf = [0; 3];
-        self.len = 0;
     }
-    fn finish(mut self) -> Result<(), std::io::Error> {
-        self.flush_buf();
-        Ok(())
-    }
-}
 
-impl<'a> std::io::Write for Base64Writer<'a> {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        for &byte in data {
-            self.buf[self.len] = byte;
-            self.len += 1;
-            if self.len == 3 {
-                self.flush_buf();
-            }
-        }
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    // SAFETY: output is only ASCII base64 characters
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 pub fn generate_shell() -> String {
@@ -119,21 +88,20 @@ body {{
 </div>
 <script>
 (function() {{
-    let isFirstLoad = true;
+    var isFirstLoad = true;
 
-    // Called from Rust via evaluate_script("injectWidget('base64html')")
     window.injectWidget = function(b64) {{
-        const html = atob(b64);
+        var html = atob(b64);
         if (!html) return;
 
-        const root = document.getElementById('widget-root');
+        var root = document.getElementById('widget-root');
 
         if (isFirstLoad) {{
             root.innerHTML = html;
             executeScripts(root);
             isFirstLoad = false;
         }} else {{
-            const temp = document.createElement('div');
+            var temp = document.createElement('div');
             temp.innerHTML = html;
             morphdom(root, temp, {{
                 childrenOnly: true,
@@ -149,10 +117,10 @@ body {{
     }};
 
     function executeScripts(container) {{
-        const scripts = container.querySelectorAll('script');
-        scripts.forEach(oldScript => {{
-            const newScript = document.createElement('script');
-            Array.from(oldScript.attributes).forEach(attr => {{
+        var scripts = container.querySelectorAll('script');
+        scripts.forEach(function(oldScript) {{
+            var newScript = document.createElement('script');
+            Array.from(oldScript.attributes).forEach(function(attr) {{
                 newScript.setAttribute(attr.name, attr.value);
             }});
             if (oldScript.src) {{
@@ -166,7 +134,9 @@ body {{
 
     window.sendPrompt = function(text) {{
         console.log('[sendPrompt stub]', text);
-        window.ipc.postMessage(JSON.stringify({{ type: 'sendPrompt', text: text }}));
+        if (window.ipc) {{
+            window.ipc.postMessage(JSON.stringify({{ type: 'sendPrompt', text: text }}));
+        }}
     }};
 }})();
 </script>
@@ -175,4 +145,54 @@ body {{
         design_system = DESIGN_SYSTEM_CSS,
         morphdom = MORPHDOM_JS,
     )
+}
+
+// Fix #5: base64 encoder has tests
+#[cfg(test)]
+mod tests {
+    use super::base64_encode;
+
+    #[test]
+    fn test_base64_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn test_base64_one_byte() {
+        assert_eq!(base64_encode(b"f"), "Zg==");
+    }
+
+    #[test]
+    fn test_base64_two_bytes() {
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+    }
+
+    #[test]
+    fn test_base64_three_bytes() {
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn test_base64_padding_cases() {
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+    }
+
+    #[test]
+    fn test_base64_html_fragment() {
+        let html = "<div>Hello <b>World</b></div>";
+        let encoded = base64_encode(html.as_bytes());
+        // Verify roundtrip: JS atob(encoded) should produce original
+        // We verify the known base64 encoding
+        assert_eq!(encoded, "PGRpdj5IZWxsbyA8Yj5Xb3JsZDwvYj48L2Rpdj4=");
+    }
+
+    #[test]
+    fn test_base64_non_ascii() {
+        let input = "你好世界";
+        let encoded = base64_encode(input.as_bytes());
+        assert!(!encoded.is_empty());
+        assert!(encoded.len() % 4 == 0);
+    }
 }

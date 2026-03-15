@@ -1,45 +1,55 @@
 /// Window creation and WebView management.
-/// Handles both visible (show) and hidden (daemon) modes.
+/// Fix #12: unified Mode enum replaces scattered bool params.
 
-use crate::protocol::ProtocolState;
 use crate::watcher;
 use crate::ipc;
 use std::path::PathBuf;
-use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 use wry::WebView;
 
+/// Viewer startup modes
+pub enum Mode {
+    /// Visible window, watch file for changes
+    Show { html: String, watch_file: PathBuf },
+    /// Hidden window, prewarmed, pipe server
+    Daemon { pipe_id: String },
+}
+
 /// Custom events sent to the winit event loop
 #[derive(Debug)]
 pub enum ViewerEvent {
-    /// Load new widget HTML content
     LoadWidget(String),
-    /// Set window title
     SetTitle(String),
-    /// Show the window (for daemon mode)
     ShowWindow,
-    /// Close and exit
     Close,
 }
 
 struct ViewerApp {
     window: Option<Window>,
     webview: Option<WebView>,
-    protocol_state: Arc<ProtocolState>,
-    initial_html: Option<String>,
-    watch_file: Option<PathBuf>,
-    start_visible: bool,
+    mode: AppMode,
     proxy: EventLoopProxy<ViewerEvent>,
+}
+
+/// Runtime state derived from Mode
+enum AppMode {
+    Show {
+        initial_html: String,
+        watch_file: PathBuf,
+    },
+    Daemon,
 }
 
 impl ViewerApp {
     fn load_widget(&self, html: &str) {
         if let Some(ref webview) = self.webview {
             let js = crate::shell::make_inject_js(html);
-            let _ = webview.evaluate_script(&js);
+            if let Err(e) = webview.evaluate_script(&js) {
+                eprintln!("Failed to evaluate script: {:?}", e);
+            }
         }
     }
 }
@@ -47,32 +57,46 @@ impl ViewerApp {
 impl ApplicationHandler<ViewerEvent> for ViewerApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
-            return; // Already created
+            return;
         }
+
+        let visible = matches!(self.mode, AppMode::Show { .. });
 
         let attrs = Window::default_attributes()
             .with_title("Claude Widget")
             .with_inner_size(winit::dpi::LogicalSize::new(740.0, 600.0))
-            .with_visible(self.start_visible);
+            .with_visible(visible);
 
-        let window = event_loop.create_window(attrs).expect("Failed to create window");
-
-        // Build the initialization script: if we have initial HTML, inject it after page load
-        let init_script = match &self.initial_html {
-            Some(html) => crate::shell::make_inject_js(html),
-            None => String::new(),
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Failed to create window: {}", e);
+                event_loop.exit();
+                return;
+            }
         };
 
-        // Clone state for the protocol closure
-        let state = self.protocol_state.clone();
+        // Build initialization script for Show mode
+        let init_script = match &self.mode {
+            AppMode::Show { initial_html, .. } => crate::shell::make_inject_js(initial_html),
+            AppMode::Daemon => String::new(),
+        };
+
+        // Fix #8: no protocol state needed — shell is served directly, widget via base64
+        let shell_html = crate::shell::generate_shell();
+        let shell_bytes = shell_html.into_bytes();
 
         let mut builder = wry::WebViewBuilder::new()
             .with_custom_protocol("wry".to_string(), move |_id, request| {
                 let uri = request.uri().to_string();
-                let (body, mime) = state.handle_request(&uri);
+                // Only need to serve shell.html — widget injection is via evaluate_script
+                let (body, mime) = if uri.contains("shell.html") || uri.ends_with("localhost") || uri.ends_with("localhost/") {
+                    (shell_bytes.clone(), "text/html")
+                } else {
+                    (format!("404 Not Found: {}", uri).into_bytes(), "text/plain")
+                };
                 wry::http::Response::builder()
-                    .header("Content-Type", &mime)
-                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Content-Type", mime)
                     .body(std::borrow::Cow::Owned(body))
                     .unwrap()
             })
@@ -80,23 +104,29 @@ impl ApplicationHandler<ViewerEvent> for ViewerApp {
                 eprintln!("[IPC from JS] {}", msg.body());
             });
 
-        // Inject initial widget via initialization script (runs after page load)
         if !init_script.is_empty() {
             builder = builder.with_initialization_script(&init_script);
         }
 
-        let webview = builder
+        let webview = match builder
             .with_url("wry://localhost/shell.html")
             .build(&window)
-            .expect("Failed to create WebView");
+        {
+            Ok(wv) => wv,
+            Err(e) => {
+                eprintln!("Failed to create WebView: {}", e);
+                event_loop.exit();
+                return;
+            }
+        };
 
         self.window = Some(window);
         self.webview = Some(webview);
 
-        // Start file watcher if a file was specified
-        if let Some(ref path) = self.watch_file {
+        // Start file watcher for Show mode
+        if let AppMode::Show { watch_file, .. } = &self.mode {
             let proxy = self.proxy.clone();
-            let path = path.clone();
+            let path = watch_file.clone();
             std::thread::spawn(move || {
                 watcher::watch_file(&path, move |new_html| {
                     let _ = proxy.send_event(ViewerEvent::LoadWidget(new_html));
@@ -122,6 +152,7 @@ impl ApplicationHandler<ViewerEvent> for ViewerApp {
                 }
             }
             ViewerEvent::Close => {
+                ipc::cleanup_pipe_id_file();
                 event_loop.exit();
             }
         }
@@ -135,53 +166,41 @@ impl ApplicationHandler<ViewerEvent> for ViewerApp {
     }
 }
 
-/// Run viewer in standalone mode (show subcommand)
-pub fn run_viewer(initial_html: Option<String>, watch_file: Option<PathBuf>, visible: bool) {
+/// Single entry point for all modes.
+pub fn run(mode: Mode) {
     let event_loop = EventLoop::<ViewerEvent>::with_user_event()
         .build()
-        .expect("Failed to create event loop");
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to create event loop: {}", e);
+            std::process::exit(1);
+        });
     let proxy = event_loop.create_proxy();
 
-    let protocol_state = Arc::new(ProtocolState::new());
+    let app_mode = match &mode {
+        Mode::Show { html, watch_file } => AppMode::Show {
+            initial_html: html.clone(),
+            watch_file: watch_file.clone(),
+        },
+        Mode::Daemon { .. } => AppMode::Daemon,
+    };
+
+    // Start pipe server for daemon mode
+    if let Mode::Daemon { pipe_id } = &mode {
+        let pipe_proxy = proxy.clone();
+        let pipe_name = ipc::pipe_name_from_id(pipe_id);
+        std::thread::spawn(move || {
+            ipc::run_pipe_server(&pipe_name, pipe_proxy);
+        });
+    }
 
     let mut app = ViewerApp {
         window: None,
         webview: None,
-        protocol_state,
-        initial_html,
-        watch_file,
-        start_visible: visible,
+        mode: app_mode,
         proxy,
     };
 
-    event_loop.run_app(&mut app).expect("Event loop failed");
-}
-
-/// Run viewer in daemon mode (listen subcommand)
-pub fn run_viewer_daemon(pipe_id: &str) {
-    let event_loop = EventLoop::<ViewerEvent>::with_user_event()
-        .build()
-        .expect("Failed to create event loop");
-    let proxy = event_loop.create_proxy();
-
-    let protocol_state = Arc::new(ProtocolState::new());
-
-    // Start the Named Pipe server in a background thread
-    let pipe_proxy = proxy.clone();
-    let pipe_name = ipc::pipe_name_from_id(pipe_id);
-    std::thread::spawn(move || {
-        ipc::run_pipe_server(&pipe_name, pipe_proxy);
-    });
-
-    let mut app = ViewerApp {
-        window: None,
-        webview: None,
-        protocol_state,
-        initial_html: None,
-        watch_file: None,
-        start_visible: false, // Hidden until a widget arrives
-        proxy,
-    };
-
-    event_loop.run_app(&mut app).expect("Event loop failed");
+    if let Err(e) = event_loop.run_app(&mut app) {
+        eprintln!("Event loop error: {}", e);
+    }
 }
