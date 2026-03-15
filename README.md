@@ -20,24 +20,54 @@ Claude Code ─── Write ──→ .claude/widgets/chart.html
                           Native window renders widget
 ```
 
-## Prerequisites
+## Quick Install
 
-- **Windows 11** (WebView2 ships pre-installed)
-- **Rust 1.77+** with MSVC toolchain
-- **MSVC Build Tools** + **Windows SDK** (for compiling wry/WebView2 bindings)
-- **jq** (for hook scripts to parse JSON)
-- **Claude Code** CLI
+**Requirements:** Windows 10/11 with [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11, available for Windows 10). [jq](https://jqlang.github.io/jq/) for hook scripts.
 
-### Installing prerequisites (scoop)
+**One-line install** (PowerShell):
 
-```bash
-scoop install rust jq
-winget install Microsoft.VisualStudio.2022.BuildTools --silent --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended"
+```powershell
+irm https://raw.githubusercontent.com/originem0/claude-widget-viewer/main/install.ps1 | iex
 ```
 
-### Cargo mirror (China)
+Or clone and run locally:
 
-If `cargo build` hangs on "Updating crates.io index", add a mirror to `~/.cargo/config.toml`:
+```powershell
+git clone https://github.com/originem0/claude-widget-viewer.git
+cd claude-widget-viewer
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+The installer downloads the pre-built binary, deploys hooks, configures `settings.json`, and installs the skill. No build tools needed.
+
+**To uninstall:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+```
+
+## Build from Source
+
+Only needed if you want to modify the code or build for a different configuration.
+
+**Build prerequisites:** Rust 1.77+ (MSVC toolchain), MSVC Build Tools, Windows SDK.
+
+```bash
+# Install build tools (if not present)
+scoop install rust
+winget install Microsoft.VisualStudio.2022.BuildTools --silent --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended"
+
+# Build
+git clone https://github.com/originem0/claude-widget-viewer.git
+cd claude-widget-viewer
+cargo build --release
+# Binary: target/release/claude-widget-viewer.exe (~756KB)
+```
+
+<details>
+<summary>Cargo mirror for China</summary>
+
+If `cargo build` hangs on "Updating crates.io index", add to `~/.cargo/config.toml`:
 
 ```toml
 [source.crates-io]
@@ -49,73 +79,32 @@ registry = "sparse+https://rsproxy.cn/index/"
 [net]
 git-fetch-with-cli = true
 ```
+</details>
 
-## Build
+After building, run `install.ps1` to deploy hooks and configure Claude Code, or do it manually:
 
-```bash
-git clone git@github.com:originem0/claude-widget-viewer.git
-cd claude-widget-viewer
-cargo build --release
-```
+<details>
+<summary>Manual setup</summary>
 
-Binary at `target/release/claude-widget-viewer.exe` (~756KB).
-
-## Install
-
-### 1. Put binary on PATH
-
-```bash
-cp target/release/claude-widget-viewer.exe <somewhere-on-PATH>/
-# e.g. scoop shims:
-cp target/release/claude-widget-viewer.exe ~/scoop/shims/
-```
-
-### 2. Deploy hook scripts
-
-```bash
-mkdir -p ~/.claude/hooks
-cp hook/widget-daemon-start.sh ~/.claude/hooks/
-cp hook/post-write-widget.sh ~/.claude/hooks/
-```
-
-### 3. Configure Claude Code hooks
-
-Add to `~/.claude/settings.json` (merge into existing `"hooks"` key):
+1. Copy `target/release/claude-widget-viewer.exe` to somewhere on PATH
+2. Copy `hook/*.sh` to `~/.claude/hooks/`
+3. Merge hooks config into `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
     "SessionStart": [
-      {
-        "hooks": [{
-          "type": "command",
-          "command": "bash ~/.claude/hooks/widget-daemon-start.sh"
-        }]
-      }
+      { "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/widget-daemon-start.sh" }] }
     ],
     "PostToolUse": [
-      {
-        "matcher": "Write",
-        "hooks": [{
-          "type": "command",
-          "command": "bash ~/.claude/hooks/post-write-widget.sh"
-        }]
-      }
+      { "matcher": "Write", "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/post-write-widget.sh" }] }
     ]
   }
 }
 ```
 
-### 4. Install the skill (optional)
-
-Copy `claude/SKILL.md` to your skills directory so Claude auto-loads widget instructions when you ask for visualizations:
-
-```bash
-mkdir -p ~/.claude/skills/widget-viewer
-cp claude/SKILL.md ~/.claude/skills/widget-viewer/SKILL.md
-```
-
-Without the skill, you can still add the widget protocol to your project's `CLAUDE.md` manually (see `claude/widget-protocol.md`).
+4. (Optional) Copy `claude/SKILL.md` to `~/.claude/skills/widget-viewer/SKILL.md`
+</details>
 
 ## Usage
 
@@ -130,54 +119,35 @@ Claude writes `.claude/widgets/temperature_chart.html` → hook triggers → win
 ### Manual
 
 ```bash
-# Standalone mode (opens window + watches file for changes)
-claude-widget-viewer show path/to/widget.html
-
-# Daemon mode (hidden window, prewarmed WebView2, listens on Named Pipe)
-claude-widget-viewer listen
-
-# Send widget to running daemon (falls back to show if no daemon)
-claude-widget-viewer send path/to/widget.html
-
-# Stop daemon
-claude-widget-viewer stop
+claude-widget-viewer show path/to/widget.html    # Open + watch for changes
+claude-widget-viewer listen                       # Daemon mode (prewarmed)
+claude-widget-viewer send path/to/widget.html     # Send to daemon
+claude-widget-viewer stop                         # Stop daemon
 ```
 
 ### Hot reload
 
-Edit the widget HTML file while the viewer is running — changes appear instantly (200ms debounce). Useful for iterating on a widget's design.
+Edit the widget HTML file while the viewer is running — changes appear instantly (200ms debounce).
 
-## Widget HTML format
+## Widget HTML Format
 
-Widgets are raw HTML fragments. No `<!DOCTYPE>`, `<html>`, `<head>`, or `<body>` tags. Structure: style first, content second, script last.
+Widgets are raw HTML fragments. No `<!DOCTYPE>`, `<html>`, `<head>`, or `<body>`. Structure: style first, content second, script last.
 
 ```html
 <style>
-  .card {
-    padding: var(--spacing-md);
-    background: var(--color-bg-secondary);
-    border-radius: var(--border-radius-lg);
-  }
+  .card { padding: var(--spacing-md); background: var(--color-bg-secondary); }
 </style>
-
 <div class="card">
-  <h2>Weekly temperature</h2>
   <canvas id="chart"></canvas>
 </div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"
-        onload="initChart()"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" onload="initChart()"></script>
 <script>
-function initChart() {
-  new Chart(document.getElementById('chart'), { /* ... */ });
-}
+function initChart() { new Chart(document.getElementById('chart'), { /* ... */ }); }
 if (window.Chart) initChart();
 </script>
 ```
 
-### CSS variables
-
-The viewer injects a design system matching claude.ai's style. Use these variables:
+### CSS Variables
 
 | Category | Variables |
 |----------|-----------|
@@ -190,11 +160,7 @@ The viewer injects a design system matching claude.ai's style. Use these variabl
 | Radius | `--border-radius-sm` / `md` / `lg` |
 | Font | `--font-sans`, `--font-mono` |
 
-Light and dark mode switch automatically via `prefers-color-scheme`.
-
-### CDN
-
-Only `https://cdnjs.cloudflare.com` is allowed. Always use the `onload` + fallback pattern for CDN scripts.
+Light/dark mode switches automatically via `prefers-color-scheme`. Only `https://cdnjs.cloudflare.com` is allowed for CDN scripts.
 
 ## Architecture
 
@@ -206,33 +172,16 @@ src/
   shell.rs      HTML shell generation, base64 injection
   watcher.rs    File watcher with 200ms debounce (notify crate)
   ipc.rs        Windows Named Pipe server/client (windows-sys)
-
-assets/
-  design-system.css   CSS variables (light/dark), SVG classes
-  morphdom.min.js     DOM diffing library (12KB, inlined at compile time)
 ```
 
-All assets are embedded via `include_str!` at compile time — zero runtime file dependencies.
-
-### IPC protocol
-
-The daemon listens on `\\.\pipe\claude-widget-viewer-{pid}`. Messages are JSON, one per connection:
-
-```json
-{"type":"LoadWidget","file":"C:/path/to/widget.html","title":"my_chart"}
-{"type":"UpdateWidget","html":"<div>partial update</div>"}
-{"type":"Show"}
-{"type":"Close"}
-```
-
-The `send` subcommand handles all pipe communication. Hook scripts never touch Named Pipes directly.
+All assets embedded at compile time via `include_str!` — zero runtime file dependencies. Daemon IPC via `\\.\pipe\claude-widget-viewer-{pid}` (JSON messages).
 
 ## Limitations
 
-- **Windows only** — uses WebView2 (WKWebView port would be needed for macOS)
-- **No streaming** — Claude generates complete HTML before writing. `UpdateWidget` IPC message is reserved for future MCP streaming support
-- **No sendPrompt()** — widgets can't send messages back to Claude yet (stub exists, needs MCP integration)
-- **Single window** — new widgets replace the current one
+- **Windows only** — uses WebView2 (WKWebView port needed for macOS)
+- **No streaming** — widget renders after Claude finishes writing (`UpdateWidget` IPC reserved for future MCP support)
+- **No sendPrompt()** — widgets can't message Claude back yet (stub exists, needs MCP)
+- **Single window** — new widget replaces current one
 
 ## License
 
