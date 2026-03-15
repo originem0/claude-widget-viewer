@@ -81,3 +81,19 @@
 .c-coral { fill: var(--color-coral); stroke: var(--color-coral); }
 .c-pink { fill: var(--color-pink); stroke: var(--color-pink); }
 .c-gray { fill: var(--color-gray); stroke: var(--color-gray); }
+
+/* Responsive chart container — wrap <canvas> in this */
+.chart-wrap {
+    width: 100%;
+    position: relative;
+}
+
+/* Responsive SVG container */
+.svg-wrap {
+    width: 100%;
+}
+.svg-wrap svg {
+    width: 100%;
+    height: auto;
+    display: block;
+}

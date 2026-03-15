@@ -2,7 +2,7 @@
 
 # claude-widget-viewer
 
-Lightweight native widget renderer that brings [claude.ai's generative UI](https://claude.com/blog/claude-builds-visuals) to Claude Code. Rust + WebView2, single 756KB binary.
+Lightweight native widget renderer that brings [claude.ai's generative UI](https://claude.com/blog/claude-builds-visuals) to Claude Code. Rust + WebView2, single ~800KB binary. Responsive layout — charts and diagrams fill the window and resize with it.
 
 Claude Code can't render HTML in the terminal. This tool bridges that gap: Claude writes widget HTML to a file, a hook detects it, and a native WebView2 window pops up with the rendered result — charts, diagrams, interactive controls, all running in a real browser engine.
 
@@ -22,7 +22,7 @@ Claude Code ─── Write ──→ .claude/widgets/chart.html
 
 ## Quick Install
 
-**Requirements:** Windows 10/11 with [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11, available for Windows 10). [jq](https://jqlang.github.io/jq/) for hook scripts.
+**Requirements:** Windows 10/11 with [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11, available for Windows 10).
 
 **One-line install** (PowerShell):
 
@@ -50,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
 
 Only needed if you want to modify the code or build for a different configuration.
 
-**Build prerequisites:** Rust 1.77+ (MSVC toolchain), MSVC Build Tools, Windows SDK.
+**Build prerequisites:** Rust 1.85+ (MSVC toolchain, edition 2024), MSVC Build Tools, Windows SDK.
 
 ```bash
 # Install build tools (if not present)
@@ -61,7 +61,7 @@ winget install Microsoft.VisualStudio.2022.BuildTools --silent --override "--wai
 git clone https://github.com/originem0/claude-widget-viewer.git
 cd claude-widget-viewer
 cargo build --release
-# Binary: target/release/claude-widget-viewer.exe (~756KB)
+# Binary: target/release/claude-widget-viewer.exe (~800KB)
 ```
 
 <details>
@@ -93,9 +93,6 @@ After building, run `install.ps1` to deploy hooks and configure Claude Code, or 
 ```json
 {
   "hooks": {
-    "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/widget-daemon-start.sh" }] }
-    ],
     "PostToolUse": [
       { "matcher": "Write", "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/post-write-widget.sh" }] }
     ]
@@ -123,6 +120,7 @@ claude-widget-viewer show path/to/widget.html    # Open + watch for changes
 claude-widget-viewer listen                       # Daemon mode (prewarmed)
 claude-widget-viewer send path/to/widget.html     # Send to daemon
 claude-widget-viewer stop                         # Stop daemon
+claude-widget-viewer hook                         # Process hook JSON from stdin
 ```
 
 ### Hot reload
@@ -131,18 +129,25 @@ Edit the widget HTML file while the viewer is running — changes appear instant
 
 ## Widget HTML Format
 
-Widgets are raw HTML fragments. No `<!DOCTYPE>`, `<html>`, `<head>`, or `<body>`. Structure: style first, content second, script last.
+Widgets are raw HTML fragments. No `<!DOCTYPE>`, `<html>`, `<head>`, or `<body>`. Structure: style first, content second, script last. Layout is fluid — widgets fill the window and resize with it.
 
 ```html
 <style>
-  .card { padding: var(--spacing-md); background: var(--color-bg-secondary); }
+  .widget-card { padding: var(--spacing-lg); background: var(--color-bg-secondary); border-radius: var(--border-radius-lg); }
 </style>
-<div class="card">
-  <canvas id="chart"></canvas>
+<div class="widget-card">
+  <div class="chart-wrap"><canvas id="chart"></canvas></div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" onload="initChart()"></script>
 <script>
-function initChart() { new Chart(document.getElementById('chart'), { /* ... */ }); }
+function initChart() {
+  var cs = getComputedStyle(document.documentElement);
+  new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: { /* ... */ },
+    options: { responsive: true, maintainAspectRatio: true }
+  });
+}
 if (window.Chart) initChart();
 </script>
 ```
@@ -160,28 +165,43 @@ if (window.Chart) initChart();
 | Radius | `--border-radius-sm` / `md` / `lg` |
 | Font | `--font-sans`, `--font-mono` |
 
-Light/dark mode switches automatically via `prefers-color-scheme`. Only `https://cdnjs.cloudflare.com` is allowed for CDN scripts.
+Light/dark mode switches automatically via `prefers-color-scheme`. Allowed CDNs: `https://cdnjs.cloudflare.com`, `https://cdn.jsdelivr.net`, `https://unpkg.com`. Fonts: `https://fonts.googleapis.com`.
 
 ## Architecture
 
 ```
 src/
-  main.rs       CLI entry, 4 subcommands (show/listen/send/stop)
+  main.rs       CLI entry, 5 subcommands (show/listen/send/stop/hook)
   viewer.rs     winit window + wry WebView, event loop
-  protocol.rs   wry:// custom protocol handler
-  shell.rs      HTML shell generation, base64 injection
+  shell.rs      HTML shell generation, sidebar layout, base64 injection
   watcher.rs    File watcher with 200ms debounce (notify crate)
   ipc.rs        Windows Named Pipe server/client (windows-sys)
 ```
 
 All assets embedded at compile time via `include_str!` — zero runtime file dependencies. Daemon IPC via `\\.\pipe\claude-widget-viewer-{pid}` (JSON messages).
 
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WIDGET_VIEWER_IDLE_TIMEOUT_SECS` | `1800` (30 min) | Daemon auto-exits after this many seconds idle |
+| `WIDGET_VIEWER_IDLE_POLL_SECS` | `60` | How often the idle timer checks |
+| `WIDGET_VIEWER_STATE_DIR` | `~/.claude/` | Override pipe state directory (useful for testing) |
+
+## Development
+
+```bash
+cargo test                    # Unit + integration tests (no GUI needed)
+cargo test -- --ignored       # Tests that require a display server
+```
+
+Tests use `WIDGET_VIEWER_STATE_DIR` with per-test temp directories for full isolation — no writes to `~/.claude/`.
+
 ## Limitations
 
 - **Windows only** — uses WebView2 (WKWebView port needed for macOS)
 - **No streaming** — widget renders after Claude finishes writing (`UpdateWidget` IPC reserved for future MCP support)
 - **No sendPrompt()** — widgets can't message Claude back yet (stub exists, needs MCP)
-- **Single window** — new widget replaces current one
 
 ## License
 

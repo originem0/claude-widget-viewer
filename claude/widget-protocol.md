@@ -12,15 +12,20 @@ Write a raw HTML fragment. No `<!DOCTYPE>`, `<html>`, `<head>`, or `<body>` tags
 
 ```html
 <style>
-  .chart-container { padding: var(--spacing-md); }
+  .widget-card { padding: var(--spacing-lg); background: var(--color-bg-secondary); border-radius: var(--border-radius-lg); }
 </style>
-<div class="chart-container">
-  <canvas id="myChart"></canvas>
+<div class="widget-card">
+  <div class="chart-wrap"><canvas id="myChart"></canvas></div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" onload="initChart()"></script>
 <script>
 function initChart() {
-  // chart code here
+  var cs = getComputedStyle(document.documentElement);
+  new Chart(document.getElementById('myChart'), {
+    type: 'line',
+    data: { /* ... */ },
+    options: { responsive: true, maintainAspectRatio: true }
+  });
 }
 if (window.Chart) initChart();
 </script>
@@ -32,11 +37,13 @@ if (window.Chart) initChart();
 - Borders: 0.5px, generous whitespace, no shadows (except focus rings)
 - Typography: only font-weight 400 and 500. h1=22px, h2=18px, h3=16px, body=16px, line-height 1.7
 - Always sentence case, never Title Case or ALL CAPS
-- Use CSS variables for all colors (never hardcode). Test: would every element be readable on a dark background?
+- Use CSS variables for all colors (never hardcode). Read via `getComputedStyle`.
 - Category colors: purple, teal, coral, pink. Semantic colors reserved: blue=info, green=success, amber=warning, red=error
 - Max 2-3 color ramps per widget
-- SVG: viewBox width 680, default corner radius rx="4"
-- No `position: fixed`, no tabs/carousels/`display:none` during render
+- SVG: use `viewBox` for aspect ratio, `width="100%"` for responsive scaling, default `rx="4"`
+- Never use fixed pixel widths for containers — use `width: 100%`
+- Chart.js: always `responsive: true`, wrap canvas in `<div class="chart-wrap">`
+- Tooltips: use `position: fixed` + `z-index: 1000` to avoid clipping
 - All content stacked vertically, container auto-sizes to content height
 
 ## CSS variables available
@@ -59,7 +66,8 @@ Fonts: `--font-sans`, `--font-mono`
 
 ## CDN
 
-Only `https://cdnjs.cloudflare.com` is allowed. Always use `onload` callback + fallback pattern for CDN scripts.
+Allowed: `https://cdnjs.cloudflare.com`, `https://cdn.jsdelivr.net`, `https://unpkg.com`. Fonts: `https://fonts.googleapis.com`.
+Always use `onload` callback + fallback pattern for CDN scripts.
 
 ## Interaction stub
 

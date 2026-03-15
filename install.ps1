@@ -83,9 +83,9 @@ if ($Uninstall) {
         }
     }
 
-    # Remove pipe id file
-    $pipeFile = Join-Path $claudeDir ".widget-viewer-pipe"
-    if (Test-Path $pipeFile) { Remove-Item $pipeFile -Force }
+    # Remove pipe id files (per-PID pattern)
+    Get-ChildItem -Path $claudeDir -Filter ".widget-viewer-pipe-*" -ErrorAction SilentlyContinue |
+        Remove-Item -Force
 
     Write-Host "`nUninstall complete.`n" -ForegroundColor Green
     exit 0
@@ -133,22 +133,12 @@ if (-not (Test-Path $hooksDir)) { New-Item -ItemType Directory -Path $hooksDir -
 
 $writeHook = @'
 #!/bin/bash
-FILE_PATH=$(jq -r '.tool_input.file_path // empty')
-if [[ "$FILE_PATH" == *".claude/widgets/"*".html" ]] || [[ "$FILE_PATH" == *'.claude\widgets\'*'.html' ]]; then
-  WIN_PATH=$(cygpath -w "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
-  cmd.exe /c "start /b claude-widget-viewer.exe send \"$WIN_PATH\"" </dev/null >/dev/null 2>&1
-fi
+claude-widget-viewer hook
 exit 0
 '@
 
 Set-Content -Path (Join-Path $hooksDir "post-write-widget.sh") -Value $writeHook -NoNewline
 Write-Host "  Hook deployed to $hooksDir" -ForegroundColor Green
-
-# Check jq
-if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
-    Write-Host "  WARNING: jq not found. Hook scripts need jq to parse JSON." -ForegroundColor Yellow
-    Write-Host "  Install: scoop install jq  OR  winget install jqlang.jq" -ForegroundColor Yellow
-}
 
 # Step 4: Configure settings.json
 Write-Host "[4/5] Configuring Claude Code settings..." -ForegroundColor White
