@@ -65,19 +65,9 @@ fn main() {
             match ipc::try_send_load_widget(&file) {
                 Ok(()) => {}
                 Err(_) => {
-                    // Fix #1: send fallback must be visible
-                    eprintln!("No daemon found, starting viewer directly...");
-                    let html = match std::fs::read_to_string(&file) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            eprintln!("Failed to read {}: {}", file.display(), e);
-                            std::process::exit(1);
-                        }
-                    };
-                    viewer::run(viewer::Mode::Show {
-                        html,
-                        watch_file: file,
-                    });
+                    // No daemon — spawn a detached `show` process and exit immediately.
+                    // Uses Windows creation flags to avoid any console window flash.
+                    spawn_detached_show(&file);
                 }
             }
         }
@@ -86,6 +76,53 @@ fn main() {
                 Ok(()) => eprintln!("Daemon stopped."),
                 Err(e) => eprintln!("Failed to stop daemon: {}", e),
             }
+        }
+    }
+}
+
+/// Spawn `claude-widget-viewer show <file>` as a fully detached GUI process.
+/// No console window flash, no stdio inheritance. Exits immediately after spawn.
+#[cfg(windows)]
+fn spawn_detached_show(file: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+
+    // CREATE_NEW_PROCESS_GROUP: detach from parent's console group
+    // DETACHED_PROCESS: no console window inheritance (GUI windows still work)
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("claude-widget-viewer"));
+
+    match std::process::Command::new(&exe)
+        .args(["show", &file.to_string_lossy()])
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Failed to spawn viewer: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn spawn_detached_show(file: &std::path::Path) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("claude-widget-viewer"));
+    match std::process::Command::new(&exe)
+        .args(["show", &file.to_string_lossy()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Failed to spawn viewer: {}", e);
+            std::process::exit(1);
         }
     }
 }
