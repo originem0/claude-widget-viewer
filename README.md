@@ -1,3 +1,5 @@
+[English](README.md) | [中文](README.zh-CN.md)
+
 # claude-widget-viewer
 
 Lightweight native widget renderer that brings [claude.ai's generative UI](https://claude.com/blog/claude-builds-visuals) to Claude Code. Rust + WebView2, single 756KB binary.
