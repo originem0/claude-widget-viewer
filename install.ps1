@@ -134,7 +134,7 @@ if (-not (Test-Path $hooksDir)) { New-Item -ItemType Directory -Path $hooksDir -
 $writeHook = @'
 #!/bin/bash
 FILE_PATH=$(jq -r '.tool_input.file_path // empty')
-if [[ "$FILE_PATH" == *".claude/widgets/"*".html" ]]; then
+if [[ "$FILE_PATH" == *".claude/widgets/"*".html" ]] || [[ "$FILE_PATH" == *'.claude\widgets\'*'.html' ]]; then
   WIN_PATH=$(cygpath -w "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
   cmd.exe /c "start /b claude-widget-viewer.exe send \"$WIN_PATH\"" </dev/null >/dev/null 2>&1
 fi
