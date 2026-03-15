@@ -1,0 +1,68 @@
+<style>
+.demo-card {
+    background: var(--color-bg-secondary);
+    border: 0.5px solid var(--color-border);
+    border-radius: var(--border-radius-lg);
+    padding: var(--spacing-lg);
+    max-width: 680px;
+}
+.demo-card h2 {
+    font-size: 18px;
+    font-weight: 500;
+    margin-bottom: var(--spacing-md);
+}
+.demo-card p {
+    color: var(--color-text-secondary);
+    font-size: 16px;
+    margin-bottom: var(--spacing-md);
+}
+.chart-container {
+    background: var(--color-bg-primary);
+    border-radius: var(--border-radius-md);
+    padding: var(--spacing-md);
+}
+</style>
+<div class="demo-card">
+    <h2>Weekly temperature</h2>
+    <p>Average daily temperatures for the past 7 days</p>
+    <div class="chart-container">
+        <canvas id="tempChart"></canvas>
+    </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" onload="initChart()"></script>
+<script>
+function initChart() {
+    const ctx = document.getElementById('tempChart').getContext('2d');
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+            datasets: [{
+                label: 'Temperature (°C)',
+                data: [12, 15, 13, 17, 20, 18, 16],
+                borderColor: getComputedStyle(document.documentElement).getPropertyValue('--color-teal').trim() || '#14b8a6',
+                backgroundColor: 'transparent',
+                tension: 0.3,
+                pointRadius: 4,
+                pointBackgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--color-teal').trim() || '#14b8a6',
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                y: {
+                    beginAtZero: false,
+                    grid: { color: getComputedStyle(document.documentElement).getPropertyValue('--color-border-light').trim() || '#f3f4f6' }
+                },
+                x: {
+                    grid: { display: false }
+                }
+            }
+        }
+    });
+}
+if (window.Chart) initChart();
+</script>

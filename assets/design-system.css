@@ -1,0 +1,83 @@
+/* Claude Widget Viewer — Design System CSS
+   Extracted from claude.ai's generative UI design system.
+   Light/dark mode via prefers-color-scheme. */
+
+:root {
+    /* Typography */
+    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, sans-serif;
+    --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+
+    /* Spacing */
+    --spacing-xs: 4px;
+    --spacing-sm: 8px;
+    --spacing-md: 16px;
+    --spacing-lg: 24px;
+    --spacing-xl: 32px;
+
+    /* Border radius */
+    --border-radius-sm: 4px;
+    --border-radius-md: 8px;
+    --border-radius-lg: 12px;
+}
+
+/* Light mode (default) */
+:root {
+    --color-text-primary: #1a1a2e;
+    --color-text-secondary: #6b7280;
+    --color-bg-primary: #ffffff;
+    --color-bg-secondary: #f9fafb;
+    --color-border: #e5e7eb;
+    --color-border-light: #f3f4f6;
+
+    /* Semantic colors */
+    --color-blue: #3b82f6;
+    --color-green: #10b981;
+    --color-amber: #f59e0b;
+    --color-red: #ef4444;
+
+    /* Category colors */
+    --color-purple: #8b5cf6;
+    --color-teal: #14b8a6;
+    --color-coral: #f97316;
+    --color-pink: #ec4899;
+    --color-gray: #6b7280;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --color-text-primary: #e5e7eb;
+        --color-text-secondary: #9ca3af;
+        --color-bg-primary: #1a1a2e;
+        --color-bg-secondary: #242442;
+        --color-border: #374151;
+        --color-border-light: #2d2d4a;
+
+        --color-blue: #60a5fa;
+        --color-green: #34d399;
+        --color-amber: #fbbf24;
+        --color-red: #f87171;
+
+        --color-purple: #a78bfa;
+        --color-teal: #2dd4bf;
+        --color-coral: #fb923c;
+        --color-pink: #f472b6;
+        --color-gray: #9ca3af;
+    }
+}
+
+/* SVG text classes */
+.t { font-family: var(--font-sans); font-size: 14px; fill: var(--color-text-primary); }
+.ts { font-family: var(--font-sans); font-size: 12px; fill: var(--color-text-secondary); }
+.th { font-family: var(--font-sans); font-size: 14px; font-weight: 500; fill: var(--color-text-primary); }
+
+/* SVG color classes */
+.c-blue { fill: var(--color-blue); stroke: var(--color-blue); }
+.c-green { fill: var(--color-green); stroke: var(--color-green); }
+.c-amber { fill: var(--color-amber); stroke: var(--color-amber); }
+.c-red { fill: var(--color-red); stroke: var(--color-red); }
+.c-purple { fill: var(--color-purple); stroke: var(--color-purple); }
+.c-teal { fill: var(--color-teal); stroke: var(--color-teal); }
+.c-coral { fill: var(--color-coral); stroke: var(--color-coral); }
+.c-pink { fill: var(--color-pink); stroke: var(--color-pink); }
+.c-gray { fill: var(--color-gray); stroke: var(--color-gray); }
